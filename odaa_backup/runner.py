@@ -7,12 +7,14 @@ import logging
 import os
 import threading
 import time
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
 from . import apis, secretstore
 from .archive import make_second_copy, second_copy_available
 from .config import Config, Source
+from .discover import read_db_config
 from .manifest import read_manifest, sha256_file, write_manifest
 from .mysql import DumpError, dump_database
 from .paths import dir_size, human_size, lp
@@ -259,9 +261,19 @@ def _run_source_inner(cfg: Config, src: Source, res: dict, dry_run: bool, intera
 
             for db in src.mysql.databases:
                 PROGRESS.update(phase=f"база данных {db.name}", file="")
+                password = None
+                if db.from_file:
+                    # Логин/пароль базы берём из конфига сайта прямо сейчас (wp-config.php и т.п.)
+                    info = read_db_config(remote.sftp, db.from_file, db.kind or "wordpress")
+                    if not info:
+                        total.errors.append(f"{db.name}: не удалось прочитать логин/пароль базы из {db.from_file}")
+                        continue
+                    secretstore.register(info["password"])
+                    db = replace(db, name=info["name"], user=info["user"], host=info["host"])
+                    password = info["password"]
                 out = snap / "db" / f"{db.name}.sql.gz"
                 try:
-                    d = dump_database(client, src.mysql, db, out, cfg.network, progress=PROGRESS)
+                    d = dump_database(client, src.mysql, db, out, cfg.network, progress=PROGRESS, password=password)
                     manifest[f"db/{db.name}.sql.gz"] = sha256_file(out)
                     dumps.append(d)
                     log.info("%s: дамп %s — %s (SQL %s), проверка пройдена", src.id, db.name,

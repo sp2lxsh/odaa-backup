@@ -183,12 +183,6 @@ def cmd_keygen(cfg: Config) -> int:
 
 
 def menu(config_path: Path) -> int:
-    created = ensure_config(config_path)
-    if created:
-        print(f"Создан файл настроек {config_path} из примера. Заполните его и запустите программу снова.")
-        _open_in_editor(config_path)
-        input("\nНажмите Enter для выхода...")
-        return 0
     while True:
         try:
             cfg = load_config(config_path)
@@ -267,7 +261,8 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--source", "-s", action="append", help="только этот источник (можно несколько)")
     r.add_argument("--scheduled", action="store_true", help="плановый запуск: только тех, кому пора по расписанию")
     r.add_argument("--dry-run", action="store_true", help="показать, что будет сделано, ничего не скачивая")
-    sub.add_parser("ui", help="открыть окно управления в браузере")
+    sub.add_parser("ui", help="открыть окно программы в браузере (то же, что запуск без параметров)")
+    sub.add_parser("menu", help="текстовое меню в консоли")
     sub.add_parser("status", help="возраст последних копий")
     sub.add_parser("setup", help="первичная настройка: пароли, отпечатки, проверка")
     sub.add_parser("check", help="проверить config.yaml")
@@ -306,7 +301,19 @@ def main(argv: list[str] | None = None) -> int:
     _fix_streams()
     args = build_parser().parse_args(argv)
     config_path = (args.config or default_config_path()).resolve()
-    if args.cmd is None:
+    if args.cmd is None or args.cmd == "ui":
+        # Двойной щелчок по программе — сразу открывается окно в браузере.
+        try:
+            cfg = load_config(config_path)
+            setup_logging(cfg.data_dir)
+        except ConfigError as e:
+            setup_logging(None)
+            print(f"\n{e}\n")
+        from .webui import serve
+
+        serve(config_path)
+        return 0
+    if args.cmd == "menu":
         return menu(config_path)
     if args.cmd == "init":
         print("Создан" if ensure_config(config_path) else "Уже существует", config_path)
@@ -316,11 +323,6 @@ def main(argv: list[str] | None = None) -> int:
     setup_logging(cfg.data_dir, console=not background or sys.stderr is not None, verbose=args.verbose)
     if args.cmd == "run":
         return cmd_run(cfg, args)
-    if args.cmd == "ui":
-        from .webui import serve
-
-        serve(config_path)
-        return 0
     if args.cmd == "status":
         return cmd_status(cfg)
     if args.cmd == "setup":

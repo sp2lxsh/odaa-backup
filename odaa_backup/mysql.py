@@ -50,9 +50,10 @@ def _cnf_value(v: str) -> str:
     return '"' + v.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def build_command(conf: MySQLConf, db: DBSpec) -> tuple[str, bytes | None, dict]:
+def build_command(conf: MySQLConf, db: DBSpec, password: str | None = None) -> tuple[str, bytes | None, dict]:
     """Команда для сервера, данные для stdin (файл настроек с паролем) и переменные окружения."""
-    password = secretstore.require(db.password_secret)
+    if password is None:
+        password = secretstore.require(db.password_secret)
     host = db.host or conf.host
     args = list(conf.extra_args) if conf.extra_args is not None else list(DEFAULT_ARGS)
     if conf.password_via == "stdin":
@@ -70,12 +71,13 @@ def build_command(conf: MySQLConf, db: DBSpec) -> tuple[str, bytes | None, dict]
     return cmd, None, {}
 
 
-def dump_database(client, conf: MySQLConf, db: DBSpec, out_path: Path, net: Network, progress=None) -> DumpResult:
+def dump_database(client, conf: MySQLConf, db: DBSpec, out_path: Path, net: Network, progress=None,
+                  password: str | None = None) -> DumpResult:
     """Снять дамп одной базы в out_path (.sql.gz) с проверкой. Повторяет при сетевых ошибках."""
     last: Exception | None = None
     for attempt in range(net.retries + 1):
         try:
-            res = _dump_once(client() if callable(client) else client, conf, db, out_path, net, progress)
+            res = _dump_once(client() if callable(client) else client, conf, db, out_path, net, progress, password)
             validate_dump(out_path, conf.min_bytes, conf.allow_empty)
             return res
         except DumpError:
@@ -89,8 +91,9 @@ def dump_database(client, conf: MySQLConf, db: DBSpec, out_path: Path, net: Netw
     raise DumpError(f"{db.name}: не удалось снять дамп: {last}")
 
 
-def _dump_once(client, conf: MySQLConf, db: DBSpec, out_path: Path, net: Network, progress) -> DumpResult:
-    cmd, stdin, _env = build_command(conf, db)
+def _dump_once(client, conf: MySQLConf, db: DBSpec, out_path: Path, net: Network, progress,
+               password: str | None = None) -> DumpResult:
+    cmd, stdin, _env = build_command(conf, db, password)
     part = out_path.with_name(out_path.name + ".part")
     os.makedirs(lp(out_path.parent), exist_ok=True)
     ch = client.get_transport().open_session()

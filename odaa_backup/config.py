@@ -83,8 +83,11 @@ class FileSpec:
 class DBSpec:
     name: str
     user: str
-    password_secret: str
+    password_secret: str | None = None
     host: str | None = None
+    # Если задано — логин/пароль базы читаются из конфига сайта (wp-config.php, .env…) при каждой копии.
+    from_file: str | None = None
+    kind: str | None = None  # wordpress | joomla | bitrix | opencart | env
 
 
 @dataclass
@@ -122,13 +125,14 @@ class Source:
     api: APIConf | None = None
     retention: Retention | None = None
     remote_checksum: bool = True
+    managed: bool = False  # добавлен через окно программы (хранится в data/app.json)
 
     def secret_names(self) -> list[str]:
         names: list[str] = []
         if self.ssh:
             names += [self.ssh.password_secret, self.ssh.key_passphrase_secret]
         if self.mysql:
-            names += [d.password_secret for d in self.mysql.databases]
+            names += [d.password_secret for d in self.mysql.databases if d.password_secret]
         if self.api:
             names += [self.api.password_secret, self.api.token_secret]
         return [n for n in names if n]
@@ -145,6 +149,8 @@ class Config:
     ui_port: int
     sources: list[Source]
     path: Path | None = None
+    auto_schedule: bool = True
+    backup_root_is_default: bool = False
 
     def source(self, sid: str) -> Source:
         for s in self.sources:
@@ -347,13 +353,15 @@ def _source(ctx: _Ctx, idx: int, raw: Any, seen_ids: set[str]) -> Source | None:
             _check_no_plain_secrets(ctx, dw, dd)
             name, user = _str(dd.get("name")), _str(dd.get("user"))
             psec = _secret(ctx, f"{dw}.password_secret", dd.get("password_secret"))
-            if not name or not psec:
-                ctx.err(dw, "нужны «name» и «password_secret»")
+            from_file = _str(dd.get("from_file"))
+            if not name or not (psec or from_file):
+                ctx.err(dw, "нужны «name» и «password_secret» (или «from_file» — конфиг сайта с паролем базы)")
                 continue
             if not re.match(r"^[A-Za-z0-9_$-]+$", name):
                 ctx.err(dw, f"недопустимое имя базы «{name}»")
                 continue
-            dbs.append(DBSpec(name=name, user=user or name, password_secret=psec, host=_str(dd.get("host"))))
+            dbs.append(DBSpec(name=name, user=user or name, password_secret=psec, host=_str(dd.get("host")),
+                              from_file=from_file, kind=_str(dd.get("kind"))))
         if not dbs:
             ctx.err(mw, "нужен список «databases»")
         via = (_str(md.get("password_via")) or "stdin").lower()
@@ -437,9 +445,11 @@ def parse_config(data: Any, base_dir: Path | None = None, path: Path | None = No
     _check_no_plain_secrets(ctx, "config", d)
 
     root_s = _str(d.get("backup_root"))
+    root_is_default = not root_s
     if not root_s:
-        ctx.err("backup_root", "укажите папку для бэкапов, например D:\\Backups")
-        root = base_dir / "backups"
+        from .paths import default_backup_root
+
+        root = default_backup_root()
     else:
         root = Path(os.path.expandvars(os.path.expanduser(root_s)))
         if not root.is_absolute():
@@ -499,7 +509,12 @@ def parse_config(data: Any, base_dir: Path | None = None, path: Path | None = No
 
     if ctx.errors:
         raise ConfigError(ctx.errors)
+    managed_ids = set(d.get("_managed_ids") or [])
+    for s in sources:
+        s.managed = s.id in managed_ids
     return Config(
+        auto_schedule=_bool(ctx, "auto_schedule", d.get("auto_schedule"), True),
+        backup_root_is_default=root_is_default,
         backup_root=root,
         data_dir=data_dir,
         retention=retention,
@@ -549,17 +564,85 @@ def parse_yaml_text(text: str, name: str = "config.yaml") -> Any:
     raise ConfigError([f"{name}: ошибка синтаксиса YAML: {first_error}{hint}"]) from None
 
 
-def load_config(path: Path, apply_user_overrides: bool = True) -> Config:
-    path = Path(path)
-    if not path.exists():
-        raise ConfigError([f"файл настроек не найден: {path}"])
+APP_FILE = "app.json"
+SETTING_KEYS = ("backup_root", "retention", "network", "telegram", "second_copy", "auto_schedule")
+
+
+def _data_dir_for(data: dict, base_dir: Path) -> Path:
+    s = _str(data.get("data_dir")) if isinstance(data, dict) else None
+    p = Path(os.path.expandvars(os.path.expanduser(s))) if s else base_dir / "data"
+    return p if p.is_absolute() else base_dir / p
+
+
+def load_app_store(data_dir: Path) -> dict:
+    """Настройки и источники, созданные в окне программы (data/app.json)."""
+    p = Path(data_dir) / APP_FILE
     try:
-        with open(path, encoding="utf-8-sig") as f:
-            text = f.read()
-    except OSError as e:
-        raise ConfigError([f"не удалось прочитать {path}: {e}"]) from None
-    data = parse_yaml_text(text, path.name)
-    cfg = parse_config(data, base_dir=path.resolve().parent, path=path)
+        with open(p, encoding="utf-8") as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return {"settings": {}, "sources": []}
+    if not isinstance(d, dict):
+        return {"settings": {}, "sources": []}
+    d.setdefault("settings", {})
+    d.setdefault("sources", [])
+    return d
+
+
+def save_app_store(data_dir: Path, store: dict) -> None:
+    Path(data_dir).mkdir(parents=True, exist_ok=True)
+    p = Path(data_dir) / APP_FILE
+    tmp = p.with_suffix(".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(store, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, p)
+
+
+def merge_store(data: dict, store: dict) -> dict:
+    """config.yaml (если есть) + настройки и источники из окна программы."""
+    merged = dict(data or {})
+    for k, v in (store.get("settings") or {}).items():
+        if k in SETTING_KEYS and v is not None:
+            if isinstance(v, dict) and isinstance(merged.get(k), dict):
+                merged[k] = {**merged[k], **v}
+            else:
+                merged[k] = v
+    app_sources = [s for s in store.get("sources") or [] if isinstance(s, dict)]
+    merged["sources"] = list(merged.get("sources") or []) + app_sources
+    merged["_managed_ids"] = [s.get("id") for s in app_sources]
+    return merged
+
+
+EXAMPLE_HOSTS = {"mylogin.beget.tech", "server123.hosting.reg.ru", "203.0.113.10"}
+
+
+def _is_example_source(x: Any) -> bool:
+    try:
+        return str(x["ssh"]["host"]).strip().lower() in EXAMPLE_HOSTS
+    except (KeyError, TypeError):
+        return False
+
+
+def load_config(path: Path, apply_user_overrides: bool = True) -> Config:
+    """Загрузить настройки. config.yaml необязателен: всё можно настроить в окне программы."""
+    path = Path(path)
+    base_dir = path.resolve().parent
+    data: Any = {}
+    if path.exists():
+        try:
+            with open(path, encoding="utf-8-sig") as f:
+                text = f.read()
+        except OSError as e:
+            raise ConfigError([f"не удалось прочитать {path}: {e}"]) from None
+        data = parse_yaml_text(text, path.name) or {}
+        if not isinstance(data, dict):
+            raise ConfigError([f"{path.name}: ожидался набор параметров «ключ: значение»"])
+        # Примеры из config.example.yaml, которые так и не заполнили, не показываем.
+        if isinstance(data.get("sources"), list):
+            data["sources"] = [x for x in data["sources"] if not _is_example_source(x)]
+    store = load_app_store(_data_dir_for(data, base_dir))
+    data = merge_store(data, store)
+    cfg = parse_config(data, base_dir=base_dir, path=path)
     if apply_user_overrides:
         cfg = apply_overrides(cfg, load_overrides(cfg))
     return cfg

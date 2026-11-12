@@ -30,8 +30,8 @@ jobs:
       - run: python -m pytest -q
       - name: PyInstaller
         run: |
-          pyinstaller --noconfirm --onefile --console --name odaa-backup --add-data "config.example.yaml;." --hidden-import keyring.backends.Windows launcher.py
-          pyinstaller --noconfirm --onefile --windowed --name odaa-backup-bg --add-data "config.example.yaml;." --hidden-import keyring.backends.Windows launcher.py
+          pyinstaller --noconfirm --onefile --console --name odaa-backup --add-data "config.example.yaml;." --add-data "odaa_backup/static;odaa_backup/static" --hidden-import keyring.backends.Windows launcher.py
+          pyinstaller --noconfirm --onefile --windowed --name odaa-backup-bg --add-data "config.example.yaml;." --add-data "odaa_backup/static;odaa_backup/static" --hidden-import keyring.backends.Windows launcher.py
           copy config.example.yaml dist\
           copy README.md dist\
       - name: Smoke test

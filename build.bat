@@ -11,9 +11,9 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements-dev.txt || goto :error
 python -m pytest -q || goto :error
 pyinstaller --noconfirm --clean --onefile --console --name odaa-backup ^
-  --add-data "config.example.yaml;." --hidden-import keyring.backends.Windows launcher.py || goto :error
+  --add-data "config.example.yaml;." --add-data "odaa_backup/static;odaa_backup/static" --hidden-import keyring.backends.Windows launcher.py || goto :error
 pyinstaller --noconfirm --onefile --windowed --name odaa-backup-bg ^
-  --add-data "config.example.yaml;." --hidden-import keyring.backends.Windows launcher.py || goto :error
+  --add-data "config.example.yaml;." --add-data "odaa_backup/static;odaa_backup/static" --hidden-import keyring.backends.Windows launcher.py || goto :error
 copy /y config.example.yaml dist\ >nul
 copy /y README.md dist\ >nul
 echo.

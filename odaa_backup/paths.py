@@ -94,3 +94,47 @@ def dir_size(path: Path) -> int:
             except OSError:
                 pass
     return total
+
+
+def list_drives() -> list[dict]:
+    """Диски Windows: буква, тип, свободно/всего. На других системах — домашняя папка."""
+    import shutil
+
+    out = []
+    if IS_WINDOWS:
+        import ctypes
+        import string
+
+        kinds = {2: "съёмный", 3: "локальный", 4: "сетевой"}
+        mask = ctypes.windll.kernel32.GetLogicalDrives()
+        for i, letter in enumerate(string.ascii_uppercase):
+            if not mask & (1 << i):
+                continue
+            root = f"{letter}:\\"
+            t = ctypes.windll.kernel32.GetDriveTypeW(ctypes.c_wchar_p(root))
+            if t not in kinds:
+                continue
+            try:
+                u = shutil.disk_usage(root)
+            except OSError:
+                continue
+            out.append({"root": root, "kind": kinds[t], "free": u.free, "total": u.total,
+                        "system": letter == os.environ.get("SystemDrive", "C:")[0].upper()})
+    else:
+        home = os.path.expanduser("~")
+        u = shutil.disk_usage(home)
+        out.append({"root": home, "kind": "локальный", "free": u.free, "total": u.total, "system": True})
+    return out
+
+
+def default_backup_root() -> Path:
+    """Папка для копий по умолчанию: несистемный локальный диск с наибольшим запасом места, иначе профиль."""
+    try:
+        drives = [d for d in list_drives() if d["kind"] == "локальный" and not d["system"]]
+    except Exception:  # noqa: BLE001
+        drives = []
+    if drives:
+        best = max(drives, key=lambda d: d["free"])
+        if best["free"] > 20 * 1024 ** 3:
+            return Path(best["root"]) / "OdaaBackups"
+    return Path(os.path.expanduser("~")) / "OdaaBackups"

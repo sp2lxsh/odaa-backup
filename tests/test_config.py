@@ -19,8 +19,16 @@ def minimal(**src):
     return {"backup_root": "/tmp/b", "sources": [s]}
 
 
-def test_example_config_is_valid(tmp_path):
+def test_example_sources_are_hidden_until_filled(tmp_path):
     cfg = load_config(ROOT / "config.example.yaml", apply_user_overrides=False)
+    assert cfg.sources == []  # незаполненные примеры не показываются
+
+
+def test_example_config_is_valid(tmp_path):
+    from odaa_backup.config import parse_yaml_text
+
+    data = parse_yaml_text((ROOT / "config.example.yaml").read_text(encoding="utf-8"))
+    cfg = parse_config(data, base_dir=tmp_path)
     assert [s.id for s in cfg.sources] == ["beget-mysite", "regru-site", "timeweb-vybor"]
     beget = cfg.source("beget-mysite")
     assert beget.mysql.databases[0].name == "mylogin_wp"

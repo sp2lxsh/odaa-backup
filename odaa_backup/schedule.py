@@ -25,14 +25,14 @@ TASK_NAME = "ODAA Backup"
 
 # Готовые варианты для выпадающего списка в интерфейсе.
 PRESETS = [
-    ("manual", "Только вручную"),
     ("every 1h", "Каждый час"),
     ("every 3h", "Каждые 3 часа"),
     ("every 6h", "Каждые 6 часов"),
-    ("every 12h", "Каждые 12 часов"),
-    ("daily 03:00", "Ежедневно в 03:00"),
-    ("daily 13:00", "Ежедневно в 13:00"),
-    ("weekly sun 03:00", "Еженедельно, вс 03:00"),
+    ("every 12h", "Два раза в день"),
+    ("daily 03:00", "Каждый день ночью (03:00)"),
+    ("daily 13:00", "Каждый день днём (13:00)"),
+    ("weekly sun 03:00", "Раз в неделю (вс, 03:00)"),
+    ("manual", "Только вручную"),
 ]
 
 
@@ -141,6 +141,19 @@ def is_due(
         return now - last_success >= timedelta(hours=s.hours) - timedelta(minutes=5)
     slot = last_slot(s, now)
     return slot is not None and last_success < slot
+
+
+def next_run(text: str, now: datetime, last_success: datetime | None) -> datetime | None:
+    """Когда ожидается следующая копия (None — только вручную)."""
+    s = parse_schedule(text)
+    if s.kind == "manual":
+        return None
+    if is_due(text, now, last_success):
+        return now
+    if s.kind == "interval":
+        return last_success + timedelta(hours=s.hours)
+    slot = last_slot(s, now)
+    return slot + (timedelta(days=1) if s.kind == "daily" else timedelta(days=7))
 
 
 # --------------------------------------------------------------------------- Планировщик Windows
