@@ -380,14 +380,15 @@ def page_add(provider: str = "beget", values: dict | None = None, msg: str = "",
 <div class="hint" data-for="timeweb">Обычно <code>root</code>.</div></div>
 <div><label class="f" for="password">Пароль</label>
 <input type="password" id="password" name="password" autocomplete="current-password">
-<div class="hint" data-for="beget regru">Пароль от хостинга. Сохранится в Диспетчере учётных данных Windows.</div>
+<div class="hint" data-for="beget regru">Пароль от хостинга. Сохранится в Диспетчере учётных данных Windows.
+Если добавили на хостинг свой SSH-ключ — пароль можно не вводить.</div>
 <div class="hint" data-for="timeweb other">{key_note}</div></div></div>
 <details><summary>Дополнительно</summary>
 <div class="two"><div><label class="f" for="port">Порт SSH</label>
 <input type="number" id="port" name="port" value="{val('port', '22')}" min="1" max="65535"></div>
-<div data-for="timeweb other"><label class="f" for="key_file">Файл SSH-ключа</label>
+<div><label class="f" for="key_file">Файл SSH-ключа (если входите по ключу)</label>
 <input type="text" id="key_file" name="key_file" value="{val('key_file')}" placeholder="C:\\Users\\вы\\.ssh\\id_ed25519"></div></div>
-<div data-for="timeweb other"><label class="f" for="key_pass">Пароль ключа (если есть)</label>
+<div><label class="f" for="key_pass">Пароль ключа (если есть)</label>
 <input type="password" id="key_pass" name="key_pass" autocomplete="off"></div>
 <div data-for="beget"><label class="f" for="api">API-пароль Beget (необязательно)</label>
 <input type="password" id="api" name="api" autocomplete="off">
