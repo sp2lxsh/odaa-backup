@@ -23,6 +23,7 @@ from pathlib import Path
 
 import paramiko
 
+from .paths import pretty_domain
 from .ssh import HostKeyError, KnownHosts, exec_read, fetch_host_key, fingerprint
 
 log = logging.getLogger(__name__)
@@ -440,7 +441,7 @@ def find_items(sftp, provider: str, home: str = ".") -> tuple[list[FoundItem], l
         if norm in seen_paths:
             return
         seen_paths.add(norm)
-        sites.append(_item(fs, f"s{len(sites)}", title, remote, seen_db))
+        sites.append(_item(fs, f"s{len(sites)}", pretty_domain(title), remote, seen_db))
 
     # Виртуальный хостинг: Beget — <домен>/public_html, Reg.ru/ISPmanager — www/<домен>
     for d in fs.dirs(home):

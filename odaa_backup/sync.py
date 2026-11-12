@@ -165,6 +165,26 @@ def walk_remote(remote, root: str, excluder: Excluder, stats: SyncStats, net: Ne
     if is_regular(st.st_mode):
         yield RemoteFile(posixpath.basename(root), root, st.st_size or 0, int(st.st_mtime or 0))
         return
+    # Быстрый путь: весь список одной командой find на сервере.
+    listing = remote.find_tree(root) if hasattr(remote, "find_tree") else None
+    if listing is not None:
+        entries, errors = listing
+        for e in errors[:20]:
+            stats.warnings.append(f"нет доступа: {e}")
+        skipped_dirs: list[str] = []
+        for kind, size, mtime, rel in entries:
+            if any(rel == d or rel.startswith(d + "/") for d in skipped_dirs[-50:]):
+                continue
+            if excluder.excluded(rel):
+                stats.excluded += 1
+                if kind == "d":
+                    skipped_dirs.append(rel)
+                continue
+            if kind == "l":
+                stats.skipped_links += 1
+            elif kind == "f":
+                yield RemoteFile(rel, posixpath.join(root, rel), size, mtime)
+        return
     stack = [("", root)]
     while stack:
         rel_dir, abs_dir = stack.pop()
@@ -247,6 +267,11 @@ def link_or_copy(src: Path, dst: Path) -> bool:
         return False
 
 
+TAR_MAX_FILE = 32 * 1024 * 1024  # файлы крупнее качаются по одному (с докачкой)
+TAR_BATCH_FILES = 3000
+TAR_BATCH_BYTES = 512 * 1024 * 1024
+
+
 def sync_tree(
     remote,
     spec: FileSpec,
@@ -259,7 +284,11 @@ def sync_tree(
     verify_remote: bool = True,
     progress=None,
 ) -> SyncStats:
-    """Скопировать одну папку (spec.remote) в snap_dir/files/<spec.name>/."""
+    """Скопировать одну папку (spec.remote) в snap_dir/files/<spec.name>/.
+
+    Мелкие файлы забираются одним потоком (tar на сервере, без записи на диск сервера),
+    крупные — по одному через SFTP с докачкой. Неизменённые — жёсткие ссылки на прошлый снимок.
+    """
     stats = SyncStats()
     excluder = Excluder(spec.exclude)
     prefix = f"files/{spec.name}"
@@ -267,11 +296,14 @@ def sync_tree(
     prev_root = local_path(prev_dir, prefix) if prev_dir else None
     limiter = RateLimiter(net.rate_limit_kbps)
     downloaded: list[tuple[RemoteFile, Path, str]] = []
+    todo: list[tuple[RemoteFile, Path, str]] = []
 
     def on_bytes(n: int) -> None:
         if progress:
             progress(bytes_=n)
 
+    if progress:
+        progress(file="список файлов…")
     for rf in walk_remote(remote, spec.remote, excluder, stats, net):
         stats.files += 1
         stats.total_bytes += rf.size
@@ -281,8 +313,6 @@ def sync_tree(
         snap_rel = f"{prefix}/{safe_rel}"
         local = local_path(dest_root, safe_rel)
         prev = local_path(prev_root, safe_rel) if prev_root else None
-        if progress:
-            progress(file=rf.rel)
 
         if dry_run:
             if prev is not None and _same(prev, rf.size, rf.mtime):
@@ -312,16 +342,98 @@ def sync_tree(
                 continue
             except OSError as e:
                 log.warning("Не удалось взять %s из прошлого снимка (%s), скачиваю заново", rf.rel, e)
-        # 3) скачать
-        ok = _download_with_retries(remote, rf, local, limiter, net, stats, on_bytes)
-        if ok:
-            h = sha256_file(local)
-            manifest[snap_rel] = h
-            downloaded.append((rf, local, snap_rel))
+        todo.append((rf, local, snap_rel))
 
-    if not dry_run and verify_remote and downloaded:
+    if dry_run:
+        return stats
+
+    # 3) скачать: мелкие — потоком tar, крупные и всё, что не пришло потоком, — по одному
+    small = [t for t in todo if t[0].size <= TAR_MAX_FILE]
+    rest = [t for t in todo if t[0].size > TAR_MAX_FILE]
+    if small and getattr(remote, "tar_ok", False) and len(small) > 1:
+        got = _tar_batches(remote, small, limiter, stats, on_bytes, progress)
+        for t in small:
+            if t[2] in got:
+                downloaded.append(t)
+            else:
+                rest.append(t)
+    else:
+        rest = small + rest
+    for rf, local, snap_rel in rest:
+        if progress:
+            progress(file=rf.rel)
+        if _download_with_retries(remote, rf, local, limiter, net, stats, on_bytes):
+            downloaded.append((rf, local, snap_rel))
+    for rf, local, snap_rel in downloaded:
+        manifest[snap_rel] = sha256_file(local)
+
+    if verify_remote and downloaded:
         _verify_against_server(remote, downloaded, manifest, limiter, net, stats, on_bytes)
     return stats
+
+
+def _tar_batches(remote, items, limiter, stats, on_bytes, progress) -> set[str]:
+    """Забрать файлы пачками через tar. Возвращает snap_rel полученных файлов."""
+    got: set[str] = set()
+    batch: list = []
+    size = 0
+    for t in items + [None]:
+        if t is not None:
+            batch.append(t)
+            size += t[0].size
+        if batch and (t is None or len(batch) >= TAR_BATCH_FILES or size >= TAR_BATCH_BYTES):
+            try:
+                _tar_one(remote, batch, limiter, stats, on_bytes, progress, got)
+            except Exception as e:  # noqa: BLE001 — недополученное докачается по одному
+                log.warning("Поток tar прервался (%s) — оставшиеся файлы скачаю по одному", e)
+                if not got:
+                    remote.tar_ok = False
+                    return got
+            batch, size = [], 0
+    return got
+
+
+def _tar_one(remote, batch, limiter, stats, on_bytes, progress, got: set[str]) -> None:
+    """Принять одну пачку; полученные файлы добавляются в got сразу (важно при обрыве потока)."""
+    import tarfile
+
+    by_name = {rf.path.lstrip("/"): (rf, local, snap_rel) for rf, local, snap_rel in batch}
+    stream = remote.tar_stream([rf.path for rf, _l, _s in batch])
+    try:
+        with tarfile.open(fileobj=stream, mode="r|") as tf:
+            for m in tf:
+                item = by_name.get(m.name) or by_name.get(m.name.lstrip("./"))
+                if item is None or not m.isfile():
+                    continue
+                rf, local, snap_rel = item
+                if progress:
+                    progress(file=rf.rel)
+                src = tf.extractfile(m)
+                part = local.with_name(local.name + ".part")
+                os.makedirs(lp(local.parent), exist_ok=True)
+                n = 0
+                with open(lp(part), "wb") as dst:
+                    while True:
+                        chunk = src.read(CHUNK)
+                        if not chunk:
+                            break
+                        dst.write(chunk)
+                        n += len(chunk)
+                        limiter.consume(len(chunk))
+                        on_bytes(len(chunk))
+                if n != m.size:
+                    os.remove(lp(part))
+                    continue
+                os.replace(lp(part), lp(local))
+                mtime = int(m.mtime) if m.size == rf.size else rf.mtime
+                os.utime(lp(local), (mtime, mtime))
+                stats.downloaded += 1
+                stats.downloaded_bytes += n
+                got.add(snap_rel)
+    finally:
+        warnings = stream.close()
+        for w in (warnings or [])[:5]:
+            stats.warnings.append(f"tar: {w}")
 
 
 def _download_with_retries(remote, rf, local, limiter, net, stats, on_bytes) -> bool:

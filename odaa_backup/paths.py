@@ -73,6 +73,21 @@ def local_path(base: Path, rel: str) -> Path:
     return base.joinpath(*parts) if parts else base
 
 
+def pretty_domain(text: str) -> str:
+    """xn--90ablqwm8e.xn--p1ai -> кириллический домен (для показа человеку)."""
+    if "xn--" not in text:
+        return text
+    out = []
+    for label in text.split("."):
+        if label.lower().startswith("xn--"):
+            try:
+                label = label.encode("ascii").decode("idna")
+            except (UnicodeError, ValueError):
+                pass
+        out.append(label)
+    return ".".join(out)
+
+
 def human_size(n: float | int | None) -> str:
     if n is None:
         return "—"

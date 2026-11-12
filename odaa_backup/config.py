@@ -11,7 +11,7 @@ from typing import Any
 
 import yaml
 
-from .paths import app_dir
+from .paths import app_dir, pretty_domain
 from .schedule import ScheduleError, parse_schedule
 
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
@@ -418,7 +418,7 @@ def _source(ctx: _Ctx, idx: int, raw: Any, seen_ids: set[str]) -> Source | None:
     return Source(
         id=sid,
         provider=provider,
-        title=_str(d.get("title")) or sid,
+        title=pretty_domain(_str(d.get("title")) or sid),
         enabled=_bool(ctx, f"{where}.enabled", d.get("enabled"), True),
         schedule=schedule,
         ssh=ssh,

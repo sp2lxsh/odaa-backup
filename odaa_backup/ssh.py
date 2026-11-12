@@ -9,6 +9,7 @@ import base64
 import hashlib
 import logging
 import os
+import shlex
 import socket
 import stat
 import threading
@@ -200,6 +201,8 @@ class SFTPRemote:
     def __init__(self, connect_fn, timeout: int = 60):
         self._connect_fn = connect_fn
         self.timeout = timeout
+        self.tar_ok = True  # станет False, если на сервере нет подходящего tar
+        self.find_ok = True
         self.client: paramiko.SSHClient | None = None
         self.sftp: paramiko.SFTPClient | None = None
         self.reconnect()
@@ -231,6 +234,44 @@ class SFTPRemote:
         f.set_pipelined(True)
         return f
 
+    def find_tree(self, root: str):
+        """Весь список файлов одной командой find (быстро даже для десятков тысяч файлов).
+
+        Возвращает ([(тип f/d/l, размер, mtime, относительный путь)], [ошибки]) или None, если find не подошёл.
+        """
+        if not self.find_ok:
+            return None
+        cmd = (f"find {shlex.quote(root)} -mindepth 1 \\( -type f -o -type d -o -type l \\) "
+               "-printf '%y\\t%s\\t%T@\\t%P\\0'")
+        out = exec_read(self.client, cmd, timeout=max(self.timeout, 900))
+        if out is None:
+            return None
+        code, stdout, stderr = out
+        if code not in (0, 1) or (code == 1 and not stdout):
+            log.info("find на сервере недоступен (код %s), обхожу папки по одной", code)
+            self.find_ok = False
+            return None
+        entries = []
+        for rec in stdout.split(b"\0"):
+            if not rec:
+                continue
+            try:
+                kind, size, mtime, rel = rec.decode("utf-8", "surrogateescape").split("\t", 3)
+                entries.append((kind, int(size), int(float(mtime)), rel))
+            except ValueError:
+                continue
+        errors = [line for line in stderr.decode("utf-8", "replace").splitlines() if line.strip()]
+        return entries, errors
+
+    def tar_stream(self, paths: list[str]) -> "ExecStream":
+        """Поток tar с перечисленными файлами (архив не сохраняется на сервере)."""
+        ch = self.client.get_transport().open_session()
+        ch.settimeout(max(self.timeout, 300))
+        ch.exec_command("tar --hard-dereference --no-recursion --null -T - -cf -")
+        ch.sendall(b"\0".join(p.encode("utf-8", "surrogateescape") for p in paths) + b"\0")
+        ch.shutdown_write()
+        return ExecStream(ch)
+
     def sha256_many(self, paths: list[str]) -> dict[str, str] | None:
         """Посчитать SHA-256 файлов НА СЕРВЕРЕ (sha256sum) одной командой. None — если недоступно."""
         if not paths:
@@ -258,6 +299,44 @@ class SFTPRemote:
         return result
 
 
+class ExecStream:
+    """stdout команды как файл для чтения; stderr собирается параллельно (чтобы канал не застрял)."""
+
+    def __init__(self, ch):
+        self.ch = ch
+        self.f = ch.makefile("rb")
+        self.err = bytearray()
+        self._t = threading.Thread(target=self._drain_stderr, daemon=True)
+        self._t.start()
+
+    def _drain_stderr(self) -> None:
+        while True:
+            try:
+                data = self.ch.recv_stderr(1 << 16)
+            except socket.timeout:
+                if self.ch.closed or self.ch.exit_status_ready():
+                    break
+                continue
+            except Exception:  # noqa: BLE001
+                break
+            if not data:
+                break
+            if len(self.err) < (1 << 20):
+                self.err += data
+
+    def read(self, n: int = -1) -> bytes:
+        return self.f.read(n)
+
+    def close(self) -> list[str]:
+        try:
+            self.ch.close()
+        except Exception:  # noqa: BLE001
+            pass
+        self._t.join(timeout=5)
+        lines = self.err.decode("utf-8", "replace").splitlines()
+        return [ln for ln in lines if ln.strip() and "Removing leading" not in ln]
+
+
 def exec_read(client: paramiko.SSHClient, command: str, stdin: bytes | None = None, timeout: int = 120):
     """Выполнить команду чтения на сервере. Возвращает (код, stdout, stderr) или None при ошибке канала."""
     try:
@@ -267,18 +346,18 @@ def exec_read(client: paramiko.SSHClient, command: str, stdin: bytes | None = No
         if stdin is not None:
             ch.sendall(stdin)
         ch.shutdown_write()
+        stream = ExecStream(ch)
         out = bytearray()
         while True:
-            data = ch.recv(1 << 16)
+            data = stream.f.read(1 << 16)
             if not data:
                 break
             out += data
-        err = bytearray()
-        while ch.recv_stderr_ready():
-            err += ch.recv_stderr(1 << 16)
         code = ch.recv_exit_status()
+        stream._t.join(timeout=5)  # noqa: SLF001
+        err = bytes(stream.err)
         ch.close()
-        return code, bytes(out), bytes(err)
+        return code, bytes(out), err
     except NETWORK_ERRORS as e:
         log.warning("Команда на сервере не выполнилась: %s", e)
         return None

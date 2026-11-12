@@ -329,7 +329,13 @@ def page_home(msg: str = "", level: str = "ok") -> bytes:
                        + _form("/task/install", '<button class="ghost">Включить</button>') + "</div>")
     total = sum((state.get(s.id, {}).get("last_size") or 0) for s in cfg.sources)
     n = len(cfg.sources)
-    title = "Все копии в порядке" if not problems else f"{problems} {_plural(problems, 'сайт требует', 'сайта требуют', 'сайтов требуют')} внимания"
+    no_copies = sum(1 for s in cfg.sources if source_health(cfg, s.id, state.get(s.id, {}), now)[0] == "none")
+    if problems:
+        title = f"{problems} {_plural(problems, 'сайт требует', 'сайта требуют', 'сайтов требуют')} внимания"
+    elif no_copies:
+        title = "Делаются первые копии" if runner.PROGRESS.as_dict()["running"] or _QUEUE else "Ещё не у всех есть копии"
+    else:
+        title = "Все копии в порядке"
     body = f"""<div class="head"><div><h1>{e(title)}</h1>
 <p class="sub" style="margin:0">{n} {_plural(n, 'источник', 'источника', 'источников')} · всего {e(human_size(total))}
 · папка <code>{e(cfg.backup_root)}</code></p></div>
@@ -682,19 +688,42 @@ def page_hostkey(sid: str) -> bytes:
 # --------------------------------------------------------------------------- действия
 
 
-def _start_run(sources: list[str] | None, dry: bool) -> tuple[str, str]:
-    if runner.PROGRESS.as_dict()["running"]:
-        return "Копирование уже идёт — дождитесь окончания.", "warn"
-    cfg = _cfg()
+_QUEUE: list[tuple[list[str] | None, bool]] = []
+_QLOCK = threading.Lock()
+_WORKER: list[threading.Thread] = []
 
-    def work():
+
+def _worker() -> None:
+    while True:
+        with _QLOCK:
+            if not _QUEUE:
+                _WORKER.clear()
+                return
+            sources, dry = _QUEUE.pop(0)
         try:
-            runner.run(cfg, sources, dry_run=dry)
+            cfg = _cfg()
+            for _attempt in range(120):  # если копирует Планировщик — подождать до ~10 минут
+                results, report = runner.run(cfg, sources, dry_run=dry)
+                if results or "уже выполняется" not in (report or ""):
+                    break
+                time.sleep(5)
         except Exception:  # noqa: BLE001
             log.exception("Ошибка запуска из окна программы")
 
-    threading.Thread(target=work, daemon=True).start()
-    return ("Пробный запуск начат." if dry else "Копирование началось.") + " Ход работы — вверху страницы.", "ok"
+
+def _start_run(sources: list[str] | None, dry: bool) -> tuple[str, str]:
+    """Поставить копирование в очередь (если что-то уже копируется — начнётся сразу после)."""
+    with _QLOCK:
+        busy = runner.PROGRESS.as_dict()["running"] or bool(_QUEUE)
+        _QUEUE.append((sources, dry))
+        if not _WORKER:
+            t = threading.Thread(target=_worker, daemon=True)
+            _WORKER.append(t)
+            t.start()
+    what = "Пробный запуск" if dry else "Копирование"
+    if busy:
+        return f"{what}: в очереди — начнётся сразу после текущего.", "ok"
+    return f"{what} началось. Ход работы — вверху страницы.", "ok"
 
 
 def _open_path(p: Path) -> None:
@@ -960,9 +989,10 @@ class Handler(BaseHTTPRequestHandler):
         ST.pending.pop(pid, None)
         log.info("Добавлены источники: %s", ", ".join(s["id"] for s in new_sources))
         extra = _ensure_task(cfg)
-        _msg, lvl = _start_run([s["id"] for s in new_sources], False)
+        msg, lvl = _start_run([s["id"] for s in new_sources], False)
         n = len(new_sources)
-        return self._redirect("/", f"Добавлено: {n}. Первая копия уже скачивается.{extra}", lvl)
+        first = "Первая копия уже скачивается." if "началось" in msg else "Первая копия начнётся сразу после текущей."
+        return self._redirect("/", f"Добавлено: {n}. {first}{extra}", lvl)
 
     def _source_settings(self, cfg: Config, sid: str, form: dict):
         s = cfg.source(sid)

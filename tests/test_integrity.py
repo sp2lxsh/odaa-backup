@@ -256,3 +256,80 @@ def test_symlinks_are_skipped(tmp_path):
     stats = sync_tree(remote, FileSpec(remote="site", name="s"), tmp_path / "snap", None, {}, NET, manifest)
     assert stats.files == 1 and stats.skipped_links == 1
     assert st.S_ISREG(os.stat(tmp_path / "snap/files/s/a.txt").st_mode)
+
+
+# --------------------------------------------------------------- быстрый путь: find + tar
+
+
+class FastRemote(LocalRemote):
+    """Как сервер с GNU find/tar: список одной командой, мелкие файлы — потоком tar."""
+
+    def __init__(self, root, break_tar_after=None):
+        super().__init__(root)
+        self.tar_ok = True
+        self.tar_calls = 0
+        self.break_after = break_tar_after
+
+    def find_tree(self, root):
+        base = self._p(root)
+        out = []
+        for dirpath, dirnames, filenames in os.walk(base):
+            for n in sorted(dirnames) + sorted(filenames):
+                full = os.path.join(dirpath, n)
+                s = os.lstat(full)
+                kind = "l" if st.S_ISLNK(s.st_mode) else "d" if st.S_ISDIR(s.st_mode) else "f"
+                out.append((kind, s.st_size, int(s.st_mtime), os.path.relpath(full, base).replace(os.sep, "/")))
+        return out, []
+
+    def tar_stream(self, paths):
+        import io
+        import tarfile
+
+        self.tar_calls += 1
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tf:
+            for p in paths:
+                tf.add(self._p(p), arcname=p.lstrip("/"))
+        data = buf.getvalue()
+        if self.break_after is not None:
+            data = data[: self.break_after]  # связь оборвалась посреди потока
+
+        class S(io.BytesIO):
+            def close(self):
+                super().close()
+                return []
+
+        return S(data)
+
+
+def test_fast_path_same_result_and_incremental(server, tmp_path):
+    for i in range(30):
+        write(str(server / f"site.ru/public_html/wp-includes/f{i}.php"), f"<?php // {i}".encode() * 50)
+    fast = FastRemote(str(server))
+    s1 = tmp_path / "b" / "2026-11-01_0300"
+    stats, manifest = run_sync(fast, s1)
+    assert fast.tar_calls == 1 and stats.downloaded == N_FILES + 30 and not stats.errors
+    assert stats.excluded >= 2  # wp-content/cache и *.log исключены и в быстром режиме
+    assert not (s1 / "files/site/wp-content/cache").exists()
+    write_manifest(s1, manifest)
+    assert verify_snapshot(s1).ok
+    # такой же результат, как у обычной поштучной загрузки
+    slow_snap = tmp_path / "slow"
+    _, m2 = run_sync(LocalRemote(str(server)), slow_snap)
+    assert {k: v for k, v in m2.items()} == manifest
+    # второй запуск — ничего не качается
+    s2 = tmp_path / "b" / "2026-11-02_0300"
+    stats2, _ = run_sync(fast, s2, prev=s1, prev_manifest=read_manifest(s1))
+    assert stats2.downloaded == 0 and fast.tar_calls == 1
+
+
+def test_fast_path_broken_stream_falls_back(server, tmp_path):
+    for i in range(10):
+        write(str(server / f"site.ru/public_html/x/f{i}.txt"), b"x" * 3000)
+    fast = FastRemote(str(server), break_tar_after=9000)
+    snap = tmp_path / "b" / "2026-11-01_0300"
+    stats, manifest = run_sync(fast, snap)
+    assert not stats.errors and stats.downloaded == N_FILES + 10
+    write_manifest(snap, manifest)
+    assert verify_snapshot(snap).ok
+    assert not list(snap.rglob("*.part"))
