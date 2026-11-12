@@ -1,0 +1,128 @@
+# =====================================================================
+#  ODAA Backup — файл настроек (config.yaml)
+#
+#  ВАЖНО: пароли и токены здесь НЕ пишутся. Вместо них указывается ИМЯ
+#  (например  password_secret: beget-ssh), а само значение вводится один раз
+#  в программе (меню → 5 «Первичная настройка» или страница «Пароли»)
+#  и хранится в Диспетчере учётных данных Windows.
+#
+#  Чтобы добавить сайт — скопируйте блок «- id: ...» и поменяйте значения.
+#  Отступы важны: используйте пробелы, не Tab.
+# =====================================================================
+
+# Куда складывать копии. Лучше отдельный диск, не системный C:.
+backup_root: "D:\\Backups"
+
+# Сколько снимков хранить (для каждого сайта). Можно менять для сайта в интерфейсе.
+retention:
+  daily: 7      # последние 7 дней — по одному снимку в день
+  weekly: 4     # плюс 4 недели — по одному в неделю
+  monthly: 6    # плюс 6 месяцев — по одному в месяц
+  latest: 3     # плюс 3 самых свежих снимка (полезно при расписании «каждые N часов»)
+
+network:
+  timeout: 60            # секунд ожидания ответа сервера
+  retries: 5             # повторов при сетевых ошибках
+  retry_delay: 10        # пауза между повторами (растёт с каждой попыткой)
+  rate_limit_kbps: 0     # ограничение скорости, КБ/с (0 — без ограничения)
+  retry_failed_after_minutes: 60   # после неудачи пробовать снова не раньше чем через N минут
+
+# Вторая копия (правило 3-2-1): после успешного бэкапа архив снимка кладётся сюда.
+# Например внешний диск "E:\\Backups" или папка Яндекс.Диска/OneDrive.
+second_copy:
+  path: ""               # пусто — не делать
+  encrypt: true          # шифровать архив 7-Zip (AES-256), нужен установленный 7-Zip
+  password_secret: archive-password
+  keep: 3                # сколько архивов хранить на втором диске для каждого сайта
+
+# Уведомления в Telegram (необязательно).
+telegram:
+  enabled: false
+  bot_token_secret: telegram-bot-token   # токен от @BotFather — вводится в программе
+  chat_id: ""                            # ваш chat_id (узнать: @userinfobot)
+  notify: always                         # always — всегда, errors — только при ошибках
+
+ui:
+  port: 8765             # окно управления: http://127.0.0.1:8765 (только с этого компьютера)
+
+sources:
+  # ------------------------------------------------------------------ Beget
+  - id: beget-mysite                 # латиница, без пробелов; это имя папки
+    provider: beget
+    title: "Сайт mysite.ru (Beget)"
+    enabled: true
+    schedule: "daily 03:00"          # manual | every 6h | daily 03:00 | weekly sun 03:00
+    ssh:
+      host: mylogin.beget.tech       # SSH-сервер из панели Beget (раздел «SSH»)
+      port: 22
+      user: mylogin
+      password_secret: beget-ssh     # или key_file + key_passphrase_secret (см. README)
+      # host_key: "SHA256:..."       # необязательно: заранее известный отпечаток сервера
+    files:
+      - remote: "mysite.ru/public_html"     # путь от домашней папки
+        name: mysite
+        exclude:
+          - "wp-content/cache"
+          - "wp-content/upgrade"
+          - "*.log"
+      # - remote: "second-site.ru/public_html"
+      #   name: second-site
+    mysql:
+      host: localhost
+      databases:
+        - name: mylogin_wp           # имя базы
+          user: mylogin_wp           # на Beget пользователь = имя базы
+          password_secret: beget-db-mylogin_wp
+    api:                             # необязательно: список бэкапов Beget в отчёте
+      type: beget
+      login: mylogin
+      password_secret: beget-api     # API-пароль: панель Beget → «API»
+
+  # ------------------------------------------------------------------ Reg.ru (ISPmanager)
+  - id: regru-site
+    provider: regru
+    title: "Сайт на Reg.ru"
+    schedule: "daily 03:30"
+    ssh:
+      host: server123.hosting.reg.ru # «Сервер» из письма/панели Reg.ru (Доступы → SSH)
+      user: u1234567
+      password_secret: regru-ssh
+    files:
+      - remote: "www/site.ru"
+        name: site
+        exclude: ["wp-content/cache", "*.log"]
+    mysql:
+      databases:
+        - name: u1234567_wp
+          user: u1234567_wp
+          password_secret: regru-db-wp
+    # api:                           # экспериментально: список копий из ISPmanager
+    #   type: ispmanager
+    #   url: "https://server123.hosting.reg.ru:1500"
+    #   login: u1234567
+    #   password_secret: regru-panel
+
+  # ------------------------------------------------------------------ Timeweb Cloud VPS
+  - id: timeweb-vybor
+    provider: timeweb
+    title: "VPS Timeweb — сервис vybor"
+    schedule: "every 6h"
+    ssh:
+      host: 203.0.113.10             # IP вашего VPS
+      user: root                     # лучше отдельный пользователь только для чтения
+      key_file: "C:\\Users\\Me\\.ssh\\id_ed25519"
+      # key_passphrase_secret: vps-key-passphrase
+    files:
+      - remote: /opt/vybor           # весь проект, включая storage/ и .env
+        name: vybor
+        exclude: ["node_modules", ".git", "*.log"]
+      - remote: /etc/systemd/system/vybor.service
+        name: systemd
+      - remote: /etc/nginx/sites-available
+        name: nginx-sites
+      - remote: /etc/nginx/nginx.conf
+        name: nginx-conf
+    api:                             # список снимков/бэкапов VPS из Timeweb (в отчёте)
+      type: timeweb
+      token_secret: timeweb-token    # панель Timeweb Cloud → API и Terraform → токен
+      # server_id: "123456"          # если серверов несколько

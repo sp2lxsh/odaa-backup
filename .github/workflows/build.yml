@@ -1,0 +1,55 @@
+name: build-windows-exe
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  test-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt pytest
+      - run: python -m pytest -q
+
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements-dev.txt
+      - run: python -m pytest -q
+      - name: PyInstaller
+        run: |
+          pyinstaller --noconfirm --onefile --console --name odaa-backup --add-data "config.example.yaml;." --hidden-import keyring.backends.Windows launcher.py
+          pyinstaller --noconfirm --onefile --windowed --name odaa-backup-bg --add-data "config.example.yaml;." --hidden-import keyring.backends.Windows launcher.py
+          copy config.example.yaml dist\
+          copy README.md dist\
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          cd dist
+          .\odaa-backup.exe init
+          .\odaa-backup.exe --help
+          Remove-Item config.yaml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: odaa-backup-windows
+          path: dist/
+      - name: Release (для тегов v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist\odaa-backup.exe,dist\odaa-backup-bg.exe,dist\config.example.yaml,dist\README.md -DestinationPath odaa-backup-windows.zip
+          gh release create $env:GITHUB_REF_NAME odaa-backup-windows.zip --title $env:GITHUB_REF_NAME --notes "Сборка для Windows 11"
+        env:
+          GH_TOKEN: ${{ github.token }}
