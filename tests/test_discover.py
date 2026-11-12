@@ -203,3 +203,29 @@ def test_beget_host_derived(monkeypatch, tmp_path):
     with pytest.raises(discover.DiscoverError):
         discover.scan("beget", "", 22, "mylogin", "pw", tmp_path)
     assert seen["host"] == "mylogin.beget.tech"
+
+
+def test_user_known_hosts_mismatch_blocks_trust(tmp_path):
+    """Если компьютер помнит другой ключ сервера (~/.ssh/known_hosts) — не доверять молча."""
+    import paramiko
+
+    from odaa_backup.ssh import HostKeyError, KnownHosts
+
+    old = paramiko.RSAKey.generate(1024)
+    new = paramiko.RSAKey.generate(1024)
+    kh = tmp_path / "known_hosts"
+    kh.write_text(f"other.host ssh-ed25519 AAAA\n@revoked x y z\nsrv.example {old.get_name()} {old.get_base64()}\n")
+    assert discover.user_known_key("srv.example", 22, "ssh-rsa", kh).asbytes() == old.asbytes()
+    ours = KnownHosts(tmp_path / "ours")
+    pol = discover._TrustOnFirstUse(ours, "srv.example", 22, kh)
+    with pytest.raises(HostKeyError) as e:
+        pol.missing_host_key(None, "srv.example", new)
+    assert e.value.mismatch and "ИЗМЕНИЛСЯ" in str(e.value)
+    assert not (tmp_path / "ours").exists()  # новый ключ не сохранён
+    pol.missing_host_key(None, "srv.example", old)  # тот же ключ — принимается
+    assert ours.check("srv.example", 22, old) == "ok"
+    # хешированные записи (HashKnownHosts) тоже понимаются
+    hashed = paramiko.HostKeys()
+    hashed.add(paramiko.HostKeys.hash_host("srv2.example"), old.get_name(), old)
+    hashed.save(str(tmp_path / "kh2"))
+    assert discover.user_known_key("srv2.example", 22, "ssh-rsa", tmp_path / "kh2") is not None

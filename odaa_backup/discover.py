@@ -23,7 +23,7 @@ from pathlib import Path
 
 import paramiko
 
-from .ssh import HostKeyError, KnownHosts, exec_read, fingerprint
+from .ssh import HostKeyError, KnownHosts, exec_read, fetch_host_key, fingerprint
 
 log = logging.getLogger(__name__)
 
@@ -204,21 +204,65 @@ def default_key_files() -> list[Path]:
     return [d / n for n in ("id_ed25519", "id_ecdsa", "id_rsa") if (d / n).exists()]
 
 
-class _TrustOnFirstUse(paramiko.MissingHostKeyPolicy):
-    """При добавлении хостинга новый сервер запоминается (его отпечаток показывается пользователю)."""
+def user_known_key(host: str, port: int, key_type: str, path: Path | None = None) -> paramiko.PKey | None:
+    """Ключ этого сервера из known_hosts Windows/OpenSSH пользователя (C:\\Users\\<имя>\\.ssh\\known_hosts)."""
+    path = path or Path(os.path.expanduser("~")) / ".ssh" / "known_hosts"
+    if not path.exists():
+        return None
+    hk = paramiko.HostKeys()
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or line.startswith("@"):
+                    continue
+                try:
+                    entry = paramiko.hostkeys.HostKeyEntry.from_line(line)
+                except Exception:  # noqa: BLE001
+                    continue
+                if entry is not None:
+                    hk._entries.append(entry)  # noqa: SLF001
+    except OSError:
+        return None
+    found = hk.lookup(host if port == 22 else f"[{host}]:{port}")
+    return found.get(key_type) if found else None
 
-    def __init__(self, known: KnownHosts, host: str, port: int):
+
+class _TrustOnFirstUse(paramiko.MissingHostKeyPolicy):
+    """При добавлении хостинга новый сервер запоминается (его отпечаток показывается пользователю).
+
+    Но если компьютер пользователя уже помнит ДРУГОЙ ключ этого сервера (~/.ssh/known_hosts),
+    подключение останавливается: это может быть подмена сервера.
+    """
+
+    def __init__(self, known: KnownHosts, host: str, port: int, user_known_hosts: Path | None = None):
         self.known, self.host, self.port = known, host, port
+        self.user_known_hosts = user_known_hosts
 
     def missing_host_key(self, client, hostname, key):
+        old = user_known_key(self.host, self.port, key.get_name(), self.user_known_hosts)
+        if old is not None and old.asbytes() != key.asbytes():
+            raise HostKeyError(self.host, self.port, fingerprint(key), key.get_name(), mismatch=True,
+                               expected=fingerprint(old))
         self.known.add(self.host, self.port, key)
         log.info("Новый сервер %s:%s, отпечаток %s сохранён", self.host, self.port, fingerprint(key))
 
 
 def wizard_connect(host: str, port: int, user: str, password: str | None, key_file: str | None,
-                   key_passphrase: str | None, data_dir: Path, timeout: int = 30):
+                   key_passphrase: str | None, data_dir: Path, timeout: int = 30,
+                   user_known_hosts: Path | None = None):
     """Подключиться для мастера. Возвращает (client, key_file_used). Бросает DiscoverError с понятным текстом."""
     known = KnownHosts(Path(data_dir) / "known_hosts")
+    # До отправки пароля: сверить ключ сервера с тем, что помнит компьютер пользователя.
+    try:
+        server_key = fetch_host_key(host, port, timeout)
+    except Exception:  # noqa: BLE001 — сетевые ошибки покажет основное подключение ниже
+        server_key = None
+    if server_key is not None:
+        old = user_known_key(host, port, server_key.get_name(), user_known_hosts)
+        if old is not None and old.asbytes() != server_key.asbytes():
+            raise HostKeyError(host, port, fingerprint(server_key), server_key.get_name(), mismatch=True,
+                               expected=fingerprint(old))
     attempts: list[tuple[str | None, paramiko.PKey | None, str | None]] = []
     errors: list[str] = []
     if password:
@@ -241,7 +285,7 @@ def wizard_connect(host: str, port: int, user: str, password: str | None, key_fi
         client = paramiko.SSHClient()
         if known.path.exists():
             client.load_host_keys(str(known.path))
-        client.set_missing_host_key_policy(_TrustOnFirstUse(known, host, port))
+        client.set_missing_host_key_policy(_TrustOnFirstUse(known, host, port, user_known_hosts))
         try:
             client.connect(host, port=port, username=user, password=pw,
                            pkey=pkey, timeout=timeout, banner_timeout=timeout, auth_timeout=timeout,
