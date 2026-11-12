@@ -16,6 +16,7 @@ import sys
 import threading
 import time
 import urllib.parse
+import urllib.request
 import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -771,6 +772,9 @@ class Handler(BaseHTTPRequestHandler):
                 if f.parent == STATIC and f.suffix == ".woff2" and f.exists():
                     return self._send(f.read_bytes(), "font/woff2", cache=True)
                 return self._send(b"not found", "text/plain", 404)
+            if parts == ["api", "version"]:
+                return self._send(json.dumps({"app": "odaa-backup", "version": __version__}).encode(),
+                                  "application/json")
             if parts == ["api", "status"]:
                 return self._send(json.dumps(runner.PROGRESS.as_dict(), ensure_ascii=False).encode(),
                                   "application/json; charset=utf-8")
@@ -1016,6 +1020,15 @@ class Handler(BaseHTTPRequestHandler):
         return self._redirect("/settings", warn.strip() or "Настройки сохранены", "warn" if warn else "ok")
 
 
+def _running_version(port: int) -> str | None:
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/version", timeout=2) as r:
+            d = json.loads(r.read().decode())
+            return d.get("version") if d.get("app") == "odaa-backup" else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def serve(config_path: Path, open_browser: bool = True) -> None:
     ST.config_path = Path(config_path)
     ST.token = secrets.token_urlsafe(24)
@@ -1023,15 +1036,27 @@ def serve(config_path: Path, open_browser: bool = True) -> None:
         ST.port = load_config(ST.config_path).ui_port
     except ConfigError:
         ST.port = 8765
-    url = f"http://127.0.0.1:{ST.port}/"
-    try:
-        httpd = ThreadingHTTPServer(("127.0.0.1", ST.port), Handler)
-    except OSError:
-        # Окно уже открыто другим экземпляром программы — просто покажем его.
-        print(f"Программа уже запущена: {url}")
-        if open_browser:
-            webbrowser.open(url)
+    httpd = None
+    base_port = ST.port
+    for port in range(base_port, base_port + 10):
+        try:
+            httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+            ST.port = port
+            break
+        except OSError:
+            if _running_version(port) == __version__:
+                # Эта же версия уже открыта — просто покажем её окно.
+                url = f"http://127.0.0.1:{port}/"
+                print(f"Программа уже запущена: {url}")
+                if open_browser:
+                    webbrowser.open(url)
+                return
+            if port == base_port:
+                print(f"Порт {port} занят (возможно, открыта старая версия программы — закройте её чёрное окно).")
+    if httpd is None:
+        print("Не удалось открыть окно программы: все порты заняты.")
         return
+    url = f"http://127.0.0.1:{ST.port}/"
     print(f"\n  {APP_NAME} {__version__}\n  Окно программы: {url}\n"
           "  Не закрывайте это окно, пока работаете с программой.\n"
           "  Автоматическое копирование работает и без него.\n")

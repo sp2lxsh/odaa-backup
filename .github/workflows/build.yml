@@ -28,19 +28,19 @@ jobs:
           python-version: "3.12"
       - run: pip install -r requirements-dev.txt
       - run: python -m pytest -q
-      - name: PyInstaller
+      - name: PyInstaller (папка с программой)
         run: |
-          pyinstaller --noconfirm --onefile --console --name odaa-backup --add-data "config.example.yaml;." --add-data "odaa_backup/static;odaa_backup/static" --hidden-import keyring.backends.Windows launcher.py
-          pyinstaller --noconfirm --onefile --windowed --name odaa-backup-bg --add-data "config.example.yaml;." --add-data "odaa_backup/static;odaa_backup/static" --hidden-import keyring.backends.Windows launcher.py
-          copy config.example.yaml dist\
-          copy README.md dist\
+          pyinstaller --noconfirm odaa-backup.spec
+          copy README.md "dist\ODAA Backup\"
+          copy config.example.yaml "dist\ODAA Backup\"
       - name: Smoke test
         shell: pwsh
         run: |
-          cd dist
-          .\odaa-backup.exe init
+          cd "dist\ODAA Backup"
           .\odaa-backup.exe --help
-          Remove-Item config.yaml
+          .\odaa-backup.exe check
+          if (Test-Path data) { Remove-Item -Recurse -Force data }
+          if (-not (Test-Path "_internal\odaa_backup\static\inter-tight-cyrillic-wght-normal.woff2")) { exit 1 }
       - uses: actions/upload-artifact@v4
         with:
           name: odaa-backup-windows
@@ -49,7 +49,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
         run: |
-          Compress-Archive -Path dist\odaa-backup.exe,dist\odaa-backup-bg.exe,dist\config.example.yaml,dist\README.md -DestinationPath odaa-backup-windows.zip
+          Compress-Archive -Path "dist\ODAA Backup" -DestinationPath odaa-backup-windows.zip
           gh release create $env:GITHUB_REF_NAME odaa-backup-windows.zip --title $env:GITHUB_REF_NAME --notes "Сборка для Windows 11"
         env:
           GH_TOKEN: ${{ github.token }}
