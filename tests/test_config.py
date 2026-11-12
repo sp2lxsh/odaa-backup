@@ -121,3 +121,30 @@ def test_private_key_loading(tmp_path):
         load_private_key(SSHConf(host="h", user="root", key_file=str(locked)))
     with pytest.raises(AuthError):
         load_private_key(SSHConf(host="h", user="root", key_file=str(tmp_path / "nope")))
+
+
+def test_windows_paths_in_double_quotes_are_tolerated(tmp_path):
+    """Типичная ошибка: "C:\\Users\\..." с одной чертой в двойных кавычках (\\U ломает YAML)."""
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        'backup_root: "C:\\Users\\sp\\Backups"\n'
+        "sources:\n"
+        "  - id: vps\n"
+        '    title: "VPS \\"мой\\""\n'
+        "    ssh: {host: 1.2.3.4, user: root, key_file: \"C:\\Users\\sp\\.ssh\\id_ed25519\"}\n"
+        '    files: ["/opt/vybor"]\n'
+        'second_copy: {path: "E:\\\\Backups"}\n',
+        encoding="utf-8",
+    )
+    cfg = load_config(p)
+    assert str(cfg.backup_root).replace("/", "\\").endswith("C:\\Users\\sp\\Backups")
+    assert cfg.sources[0].ssh.key_file == "C:\\Users\\sp\\.ssh\\id_ed25519"
+    assert cfg.second_copy.path == "E:\\Backups"
+
+
+def test_unfixable_yaml_error_has_hint(tmp_path):
+    p = tmp_path / "config.yaml"
+    p.write_text('backup_root: "C:\\Users\\it\'s"\nsources: [\n', encoding="utf-8")
+    with pytest.raises(ConfigError) as e:
+        load_config(p)
+    assert "одинарных кавычках" in str(e.value)

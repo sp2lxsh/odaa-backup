@@ -512,15 +512,53 @@ def parse_config(data: Any, base_dir: Path | None = None, path: Path | None = No
     )
 
 
+# Строка в двойных кавычках, похожая на путь Windows: "C:\..." или "\\server\...".
+_DQ_WITH_BACKSLASH = re.compile(r'"((?:[A-Za-z]:\\|\\\\)[^"\n]*)"')
+
+
+def _windows_paths_to_single_quotes(text: str) -> str:
+    """"C:\\Users\\..." в двойных кавычках -> 'C:\\Users\\...' (в одинарных обратная черта не спецсимвол)."""
+
+    def fix(m: re.Match) -> str:
+        inner = m.group(1)
+        if "'" in inner:
+            return m.group(0)
+        if "\\\\" in inner:  # уже записано правильно, с двойной чертой
+            inner = inner.replace("\\\\", "\\")
+        return "'" + inner + "'"
+
+    return _DQ_WITH_BACKSLASH.sub(fix, text)
+
+
+def parse_yaml_text(text: str, name: str = "config.yaml") -> Any:
+    """Разобрать YAML. Пути Windows в двойных кавычках с одной обратной чертой исправляются автоматически."""
+    try:
+        return yaml.safe_load(text)
+    except yaml.YAMLError as e:
+        first_error = e
+    fixed = _windows_paths_to_single_quotes(text)
+    if fixed != text:
+        try:
+            return yaml.safe_load(fixed)
+        except yaml.YAMLError:
+            pass
+    hint = ""
+    if "escape" in str(first_error):
+        hint = (" — путь Windows пишите в одинарных кавычках: 'C:\\Users\\sp\\Backups' "
+                "(или в двойных, но с двойной чертой: \"C:\\\\Users\\\\sp\\\\Backups\")")
+    raise ConfigError([f"{name}: ошибка синтаксиса YAML: {first_error}{hint}"]) from None
+
+
 def load_config(path: Path, apply_user_overrides: bool = True) -> Config:
     path = Path(path)
     if not path.exists():
         raise ConfigError([f"файл настроек не найден: {path}"])
     try:
         with open(path, encoding="utf-8-sig") as f:
-            data = yaml.safe_load(f)
-    except yaml.YAMLError as e:
-        raise ConfigError([f"{path.name}: ошибка синтаксиса YAML: {e}"]) from None
+            text = f.read()
+    except OSError as e:
+        raise ConfigError([f"не удалось прочитать {path}: {e}"]) from None
+    data = parse_yaml_text(text, path.name)
     cfg = parse_config(data, base_dir=path.resolve().parent, path=path)
     if apply_user_overrides:
         cfg = apply_overrides(cfg, load_overrides(cfg))
