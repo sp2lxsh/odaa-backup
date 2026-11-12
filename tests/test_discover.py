@@ -139,7 +139,12 @@ def test_find_on_vps(tmp_path):
     put(r, "etc/systemd/system/vybor.service", "[Unit]")
     put(r, "etc/letsencrypt/live/x", "")
     os.makedirs(os.path.join(r, "home/u"), exist_ok=True)
+    put(r, "opt/sometool/bin/tool", "")
     sites, extras = find_items(FakeSFTP(r), "timeweb")
+    by = {s.title: s for s in sites}
+    assert by["vybor"].checked and by["vybor"].kind == "app"
+    assert not by["sometool"].checked  # установленная программа — без галочки
+    sites = [s for s in sites if s.title != "sometool"]
     assert [(s.title, s.remote, s.kind) for s in sites] == [("vybor", "/opt/vybor", "app")]
     assert "node_modules" in sites[0].exclude and not sites[0].dbs
     keys = {x.title: x for x in extras}
@@ -229,3 +234,19 @@ def test_user_known_hosts_mismatch_blocks_trust(tmp_path):
     hashed.add(paramiko.HostKeys.hash_host("srv2.example"), old.get_name(), old)
     hashed.save(str(tmp_path / "kh2"))
     assert discover.user_known_key("srv2.example", 22, "ssh-rsa", tmp_path / "kh2") is not None
+
+
+def test_finds_custom_named_keys_and_ssh_config(tmp_path):
+    d = tmp_path / ".ssh"
+    d.mkdir()
+    for name in ("id_ed25519_privoz", "id_ed25519_vps"):
+        (d / name).write_text("KEY")
+        (d / (name + ".pub")).write_text("ssh-ed25519 AAAA")
+    for junk in ("config", "known_hosts", "known_hosts.old"):
+        (d / junk).write_text("")
+    (d / "config").write_text(f"Host vps myvps 203.0.113.10\n  HostName 203.0.113.10\n  User root\n"
+                              f"  IdentityFile {d / 'id_ed25519_vps'}\n")
+    assert [p.name for p in discover.default_key_files(None, d)] == ["id_ed25519_privoz", "id_ed25519_vps"]
+    # для сервера из config нужный ключ идёт первым
+    assert [p.name for p in discover.default_key_files("203.0.113.10", d)][0] == "id_ed25519_vps"
+    assert discover.ssh_config_for("myvps", d)["hostname"] == "203.0.113.10"

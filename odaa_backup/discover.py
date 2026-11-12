@@ -199,9 +199,41 @@ class ScanResult:
 # --------------------------------------------------------------------------- подключение
 
 
-def default_key_files() -> list[Path]:
-    d = Path(os.path.expanduser("~")) / ".ssh"
-    return [d / n for n in ("id_ed25519", "id_ecdsa", "id_rsa") if (d / n).exists()]
+SSH_DIR_SKIP = {"config", "known_hosts", "known_hosts.old", "authorized_keys", "environment"}
+
+
+def ssh_dir() -> Path:
+    return Path(os.path.expanduser("~")) / ".ssh"
+
+
+def ssh_config_for(host: str, base: Path | None = None) -> dict:
+    """Настройки сервера из ~/.ssh/config (HostName, User, Port, IdentityFile), если есть."""
+    path = (base or ssh_dir()) / "config"
+    if not host or not path.exists():
+        return {}
+    try:
+        return dict(paramiko.SSHConfig.from_path(str(path)).lookup(host))
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def default_key_files(host: str | None = None, base: Path | None = None) -> list[Path]:
+    """SSH-ключи пользователя: сначала указанные для этого сервера в ~/.ssh/config, затем все остальные
+    (любые имена, например id_ed25519_vps — у каждого ключа рядом лежит .pub)."""
+    d = base or ssh_dir()
+    out: list[Path] = []
+    for f in ssh_config_for(host or "", d).get("identityfile", []):
+        p = Path(os.path.expanduser(f))
+        if p.exists() and p not in out:
+            out.append(p)
+    if d.is_dir():
+        std = ["id_ed25519", "id_ecdsa", "id_rsa"]
+        files = sorted(d.iterdir(), key=lambda p: (std.index(p.name) if p.name in std else 9, p.name))
+        for p in files:
+            if (p.is_file() and p.suffix != ".pub" and p.name not in SSH_DIR_SKIP and not p.name.endswith(".old")
+                    and (p.with_name(p.name + ".pub").exists() or p.name in std) and p not in out):
+                out.append(p)
+    return out
 
 
 def user_known_key(host: str, port: int, key_type: str, path: Path | None = None) -> paramiko.PKey | None:
@@ -270,7 +302,7 @@ def wizard_connect(host: str, port: int, user: str, password: str | None, key_fi
         if password.strip() != password and password.strip():
             # Частая ошибка при копировании: лишний пробел или перевод строки в конце.
             attempts.append((None, None, password.strip()))
-    keys = [Path(key_file)] if key_file else ([] if password else default_key_files())
+    keys = [Path(key_file)] if key_file else ([] if password else default_key_files(host))
     for kf in keys:
         try:
             attempts.append((str(kf), paramiko.PKey.from_path(str(kf), password=key_passphrase or None), None))
@@ -432,6 +464,10 @@ def find_items(sftp, provider: str, home: str = ".") -> tuple[list[FoundItem], l
         for d in fs.dirs("/opt"):
             if d not in VPS_SKIP_OPT:
                 add(d, f"/opt/{d}")
+                if sites and sites[-1].remote == f"/opt/{d}" and sites[-1].kind == "site" and not sites[-1].dbs:
+                    # В /opt часто лежат установленные программы, а не проекты — галочку не ставим.
+                    sites[-1].checked = False
+                    sites[-1].note = "похоже на установленную программу, а не ваш проект"
         # конфиги сервера
         if fs.isdir("/etc/nginx"):
             extras.append(FoundItem("x-nginx", "Настройки nginx", "/etc/nginx", "config", ["*.log"]))
@@ -462,6 +498,13 @@ def scan(provider: str, host: str, port: int, user: str, password: str | None, d
     host = (host or "").strip()
     if provider == "beget" and not host:
         host = f"{user}.beget.tech"
+    sc = ssh_config_for(host)
+    if sc.get("hostname") and sc["hostname"] != host:
+        log.info("Сервер «%s» найден в ~/.ssh/config: %s", host, sc["hostname"])
+        host = sc["hostname"]
+        user = user or sc.get("user", "")
+        if port == 22 and str(sc.get("port", "22")).isdigit():
+            port = int(sc.get("port", 22))
     if provider == "timeweb" and not user:
         user = "root"
     if not host:

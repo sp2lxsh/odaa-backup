@@ -360,7 +360,8 @@ def page_add(provider: str = "beget", values: dict | None = None, msg: str = "",
         f'<label class="choice"><input type="radio" name="provider" value="{k}"{" checked" if k == provider else ""}>'
         f'<b>{e(p["title"])}</b><span>{e(p["hint"])}</span></label>' for k, p in discover.PROVIDERS.items())
     keys = discover.default_key_files()
-    key_note = (f"Входите по SSH-ключу? Оставьте пароль пустым — найден ключ <code>{e(keys[0])}</code>."
+    key_note = (f"Входите по SSH-ключу? Оставьте пароль пустым — программа попробует найденные ключи: "
+                f"{', '.join('<code>' + e(k.name) + '</code>' for k in keys[:4])}."
                 if keys else "Входите по SSH-ключу? Оставьте пароль пустым и укажите файл ключа в «Дополнительно».")
 
     def val(k: str, d: str = "") -> str:
