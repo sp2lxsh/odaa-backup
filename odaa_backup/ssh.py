@@ -140,12 +140,12 @@ def load_private_key(conf: SSHConf, interactive: bool = False) -> paramiko.PKey:
         passphrase = secretstore.require(conf.key_passphrase_secret, interactive)
     path = os.path.expandvars(os.path.expanduser(conf.key_file or ""))
     try:
-        return paramiko.PKey.from_path(path, passphrase=passphrase)
+        return paramiko.PKey.from_path(path, password=passphrase)
     except FileNotFoundError:
         raise AuthError(f"не найден файл SSH-ключа: {path}") from None
-    except paramiko.PasswordRequiredException:
-        raise AuthError("SSH-ключ защищён паролем — задайте «key_passphrase_secret»") from None
-    except paramiko.SSHException as e:
+    except (paramiko.PasswordRequiredException, TypeError):
+        raise AuthError("SSH-ключ защищён паролем — задайте «key_passphrase_secret» и введите пароль ключа") from None
+    except (paramiko.SSHException, ValueError) as e:
         raise AuthError(f"не удалось прочитать SSH-ключ {path}: {e}") from None
 
 

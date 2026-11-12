@@ -109,8 +109,8 @@ sources:
     schedule: "every 6h"
     ssh:
       host: 203.0.113.10             # IP вашего VPS
-      user: root                     # лучше отдельный пользователь только для чтения
-      key_file: "C:\\Users\\Me\\.ssh\\id_ed25519"
+      user: root
+      key_file: "~/.ssh/id_ed25519"  # ~ = C:\\Users\\ВАШЕ_ИМЯ; укажите ваш ключ, которым заходите на VPS
       # key_passphrase_secret: vps-key-passphrase
     files:
       - remote: /opt/vybor           # весь проект, включая storage/ и .env

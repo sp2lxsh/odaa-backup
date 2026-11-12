@@ -102,3 +102,22 @@ def test_yaml_syntax_error(tmp_path):
     with pytest.raises(ConfigError) as e:
         load_config(p)
     assert "YAML" in str(e.value)
+
+
+def test_private_key_loading(tmp_path):
+    """Ключи ed25519 и RSA (как у ssh-keygen в Windows), с паролем и без."""
+    import paramiko
+
+    from odaa_backup.config import SSHConf
+    from odaa_backup.ssh import AuthError, load_private_key
+
+    k = paramiko.RSAKey.generate(2048)
+    plain = tmp_path / "id_rsa"
+    k.write_private_key_file(str(plain))
+    assert load_private_key(SSHConf(host="h", user="root", key_file=str(plain))).get_name() == "ssh-rsa"
+    locked = tmp_path / "id_rsa_locked"
+    k.write_private_key_file(str(locked), password="pw")
+    with pytest.raises(AuthError):
+        load_private_key(SSHConf(host="h", user="root", key_file=str(locked)))
+    with pytest.raises(AuthError):
+        load_private_key(SSHConf(host="h", user="root", key_file=str(tmp_path / "nope")))
