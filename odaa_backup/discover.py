@@ -219,14 +219,17 @@ def wizard_connect(host: str, port: int, user: str, password: str | None, key_fi
                    key_passphrase: str | None, data_dir: Path, timeout: int = 30):
     """Подключиться для мастера. Возвращает (client, key_file_used). Бросает DiscoverError с понятным текстом."""
     known = KnownHosts(Path(data_dir) / "known_hosts")
-    attempts: list[tuple[str | None, paramiko.PKey | None]] = []
+    attempts: list[tuple[str | None, paramiko.PKey | None, str | None]] = []
     errors: list[str] = []
     if password:
-        attempts.append((None, None))
+        attempts.append((None, None, password))
+        if password.strip() != password and password.strip():
+            # Частая ошибка при копировании: лишний пробел или перевод строки в конце.
+            attempts.append((None, None, password.strip()))
     keys = [Path(key_file)] if key_file else ([] if password else default_key_files())
     for kf in keys:
         try:
-            attempts.append((str(kf), paramiko.PKey.from_path(str(kf), password=key_passphrase or None)))
+            attempts.append((str(kf), paramiko.PKey.from_path(str(kf), password=key_passphrase or None), None))
         except (paramiko.PasswordRequiredException, TypeError):
             errors.append(f"ключ {kf.name} защищён паролем — укажите «Пароль ключа» в дополнительных настройках")
         except (paramiko.SSHException, ValueError, OSError) as e:
@@ -234,22 +237,33 @@ def wizard_connect(host: str, port: int, user: str, password: str | None, key_fi
     if not attempts:
         raise DiscoverError("Введите пароль. " + ("; ".join(errors) if errors else
                             "SSH-ключ в папке .ssh не найден."))
-    for kf, pkey in attempts:
+    for kf, pkey, pw in attempts:
         client = paramiko.SSHClient()
         if known.path.exists():
             client.load_host_keys(str(known.path))
         client.set_missing_host_key_policy(_TrustOnFirstUse(known, host, port))
         try:
-            client.connect(host, port=port, username=user, password=password if pkey is None else None,
+            client.connect(host, port=port, username=user, password=pw,
                            pkey=pkey, timeout=timeout, banner_timeout=timeout, auth_timeout=timeout,
                            allow_agent=False, look_for_keys=False, compress=True)
+            if pw is not None and pw != password:
+                log.info("Пароль подошёл без пробелов по краям")
             return client, kf
         except paramiko.BadHostKeyException as e:
             client.close()
             raise HostKeyError(host, port, fingerprint(e.key), e.key.get_name(), True,
                                fingerprint(e.expected_key)) from None
-        except paramiko.AuthenticationException:
+        except paramiko.BadAuthenticationType as ex:
             client.close()
+            allowed = ", ".join(ex.allowed_types or []) or "неизвестно"
+            log.warning("%s: сервер не принимает этот способ входа, разрешено: %s", host, allowed)
+            if "password" not in (ex.allowed_types or []) and "keyboard-interactive" not in (ex.allowed_types or []):
+                raise DiscoverError(f"Сервер {host} не принимает вход по паролю — только по SSH-ключу "
+                                    f"(разрешено: {allowed}). Добавьте SSH-ключ в панели хостинга.") from None
+            errors.append(f"способ входа не принят (сервер разрешает: {allowed})")
+        except paramiko.AuthenticationException as ex:
+            client.close()
+            log.warning("%s: отказ в авторизации для %s: %s", host, user, ex)
             errors.append("неверный логин или пароль" if pkey is None else f"ключ {Path(kf).name} не подошёл")
         except (OSError, EOFError, paramiko.SSHException) as e:
             client.close()
@@ -262,7 +276,8 @@ def wizard_connect(host: str, port: int, user: str, password: str | None, key_fi
                 raise DiscoverError(f"Сервер «{host}» отказал в подключении — SSH выключен или другой порт.") \
                     from None
             raise DiscoverError(f"Не удалось подключиться к {host}: {msg}") from None
-    raise DiscoverError("Сервер не пустил: " + "; ".join(errors) + ".")
+    uniq = list(dict.fromkeys(errors))
+    raise DiscoverError(f"Сервер {host} не пустил пользователя «{user}»: " + "; ".join(uniq) + ".")
 
 
 # --------------------------------------------------------------------------- поиск сайтов
