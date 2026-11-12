@@ -88,8 +88,12 @@ def server(tmp_path):
     write(str(site / "wp-content" / "uploads" / "фото кота.jpg"), b"\xff\xd8 jpeg data")
     write(str(site / "wp-content" / "cache" / "big.html"), b"cache")
     write(str(site / "debug.log"), b"log")
-    write(str(site / "wp-content" / "plugins" / "a:b.txt"), b"colon")
+    if os.name != "nt":  # в Windows такой файл не создать, а на сервере Linux он бывает
+        write(str(site / "wp-content" / "plugins" / "a:b.txt"), b"colon")
     return root
+
+
+N_FILES = 3 if os.name != "nt" else 2
 
 
 def run_sync(remote, snap, prev=None, prev_manifest=None, **kw):
@@ -103,12 +107,12 @@ def test_full_then_incremental_with_hardlinks(server, tmp_path):
     remote = LocalRemote(str(server))
     s1 = tmp_path / "b" / "2026-11-01_0300"
     stats, manifest = run_sync(remote, s1)
-    assert stats.files == 3 and stats.downloaded == 3 and stats.excluded == 2
+    assert stats.files == N_FILES and stats.downloaded == N_FILES and stats.excluded == 2
     assert not stats.errors
     assert (s1 / "files/site/wp-content/uploads/фото кота.jpg").read_bytes() == b"\xff\xd8 jpeg data"
-    # двоеточие недопустимо в Windows — имя закодировано
-    assert (s1 / "files/site/wp-content/plugins/a%3Ab.txt").exists()
-    assert stats.renamed
+    if os.name != "nt":  # двоеточие недопустимо в Windows — имя закодировано
+        assert (s1 / "files/site/wp-content/plugins/a%3Ab.txt").exists()
+        assert stats.renamed
     write_manifest(s1, manifest)
     assert verify_snapshot(s1).ok
 
@@ -116,7 +120,7 @@ def test_full_then_incremental_with_hardlinks(server, tmp_path):
     write(str(server / "site.ru/public_html/index.php"), b"<?php echo 2;", mtime=1_700_000_100)
     s2 = tmp_path / "b" / "2026-11-02_0300"
     stats2, manifest2 = run_sync(remote, s2, prev=s1, prev_manifest=read_manifest(s1))
-    assert stats2.downloaded == 1 and stats2.linked + stats2.copied_local == 2
+    assert stats2.downloaded == 1 and stats2.linked + stats2.copied_local == N_FILES - 1
     write_manifest(s2, manifest2)
     assert verify_snapshot(s2).ok
     a = s1 / "files/site/wp-content/uploads/фото кота.jpg"
@@ -131,7 +135,7 @@ def test_dry_run_writes_nothing(server, tmp_path):
     remote = LocalRemote(str(server))
     snap = tmp_path / "b" / "2026-11-01_0300"
     stats, manifest = run_sync(remote, snap, dry_run=True)
-    assert stats.plan_new == 3 and stats.plan_bytes > 0
+    assert stats.plan_new == N_FILES and stats.plan_bytes > 0
     assert not snap.exists() and manifest == {}
 
 
