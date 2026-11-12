@@ -490,12 +490,49 @@ def _custom_units(sftp) -> list[str]:
                   if a.filename.endswith(".service") and stat.S_ISREG(a.st_mode or 0))
 
 
+PANEL_PORTS = {80, 443, 1500, 1501, 2222, 8080, 8083, 8443}
+
+
+def normalize_host(text: str) -> tuple[str, int | None]:
+    """Из того, что вставил пользователь, достать имя сервера (и SSH-порт, если он явно указан).
+
+    'https://server165.hosting.reg.ru:1500/' -> ('server165.hosting.reg.ru', None)
+    'root@1.2.3.4'                            -> ('1.2.3.4', None)
+    'example.com:2200'                        -> ('example.com', 2200)
+    """
+    t = (text or "").strip().strip("/").strip()
+    if "://" in t:
+        t = t.split("://", 1)[1]
+    t = t.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+    if "@" in t:
+        t = t.rsplit("@", 1)[1]
+    port = None
+    if t.startswith("["):  # [IPv6]:port
+        h, _, rest = t[1:].partition("]")
+        t = h
+        if rest.startswith(":") and rest[1:].isdigit():
+            port = int(rest[1:])
+    elif t.count(":") == 1:
+        h, p = t.split(":")
+        t = h
+        if p.isdigit():
+            port = int(p)
+    if port in PANEL_PORTS:  # это порт панели управления/сайта, а не SSH
+        port = None
+    return t.strip().lower(), port
+
+
 def scan(provider: str, host: str, port: int, user: str, password: str | None, data_dir: Path,
          key_file: str | None = None, key_passphrase: str | None = None, timeout: int = 30) -> ScanResult:
     """Подключиться и найти всё, что стоит копировать."""
     provider = provider if provider in PROVIDERS else "other"
     user = (user or "").strip()
-    host = (host or "").strip()
+    host, explicit_port = normalize_host(host)
+    if explicit_port and port == 22:
+        port = explicit_port
+    if "@" in user:  # вставили «логин@сервер»
+        user, _, h = user.partition("@")
+        host = host or normalize_host(h)[0]
     if provider == "beget" and not host:
         host = f"{user}.beget.tech"
     sc = ssh_config_for(host)

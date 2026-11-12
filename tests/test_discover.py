@@ -250,3 +250,16 @@ def test_finds_custom_named_keys_and_ssh_config(tmp_path):
     # для сервера из config нужный ключ идёт первым
     assert [p.name for p in discover.default_key_files("203.0.113.10", d)][0] == "id_ed25519_vps"
     assert discover.ssh_config_for("myvps", d)["hostname"] == "203.0.113.10"
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("https://server165.hosting.reg.ru:1500/", ("server165.hosting.reg.ru", None)),
+    ("server165.hosting.reg.ru", ("server165.hosting.reg.ru", None)),
+    (" http://Site.ru/wp-admin ", ("site.ru", None)),
+    ("root@203.0.113.10", ("203.0.113.10", None)),
+    ("example.com:2200", ("example.com", 2200)),
+    ("sftp://u1@host.ru:22/www", ("host.ru", 22)),
+    ("[2001:db8::1]:2222", ("2001:db8::1", None)),
+])
+def test_normalize_host(text, expected):
+    assert discover.normalize_host(text) == expected
